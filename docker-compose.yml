@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: colibri-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: colibri
+      POSTGRES_PASSWORD: colibri_secret
+      POSTGRES_DB: colibri
+    ports:
+      - "5433:5432"
+    volumes:
+      - colibri_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U colibri -d colibri"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  colibri_pgdata:

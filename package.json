@@ -1,0 +1,31 @@
+{
+  "name": "colibri-backend",
+  "version": "1.0.0",
+  "description": "API de Colibrí: jugadores, progreso, ranking global y duelos en tiempo real",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "migrate": "node db/migrate.js",
+    "seed": "node db/seed.js",
+    "test": "node --test --test-concurrency=1 test/api.test.js test/duel.test.js",
+    "demo:duel": "node scripts/duel-demo.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.6",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.23.1",
+    "ws": "^8.22.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14",
+    "supertest": "^7.3.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
