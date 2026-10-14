@@ -1,7 +1,7 @@
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
-const { Pool } = require('pg');
+const { getPool, closePool } = require('../src/config/db');
 
 const MIGRATIONS_DIR = path.join(__dirname, 'migrations');
 
@@ -43,11 +43,11 @@ async function migrate(pool) {
 module.exports = { migrate };
 
 if (require.main === module) {
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  const pool = getPool();
   migrate(pool)
     .then(() => {
       console.log('migraciones al día');
-      return pool.end();
+      return closePool();
     })
     .catch((err) => {
       console.error('error de migración:', err.message);

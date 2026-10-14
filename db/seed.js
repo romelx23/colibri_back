@@ -1,7 +1,7 @@
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
-const { Pool } = require('pg');
+const { getPool, closePool } = require('../src/config/db');
 
 const QUESTIONS_DIR =
   process.env.QUESTIONS_DIR || path.join(__dirname, '..', '..', 'colibri', 'assets', 'questions');
@@ -94,12 +94,12 @@ async function seed(pool) {
 module.exports = { seed, loadQuestions, QUESTIONS_DIR };
 
 if (require.main === module) {
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  const pool = getPool();
   seed(pool)
     .then((res) => {
       console.log(`seed: ${res.total} preguntas`);
       for (const r of res.byCategory) console.log(`  ${r.categoria}: ${r.n}`);
-      return pool.end();
+      return closePool();
     })
     .catch((err) => {
       console.error('error de seed:', err.message);
