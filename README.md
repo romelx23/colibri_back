@@ -52,7 +52,16 @@ El API queda en `http://localhost:4000` y los duelos en `ws://localhost:4000/ws`
 | `PORT` | Puerto HTTP | `4000` |
 | `DATABASE_URL` | Connection string de Postgres | `postgres://user:pass@host:5432/colibri` |
 | `JWT_SECRET` | Secreto para firmar tokens | _(obligatorio en producción)_ |
-| `CORS_ORIGIN` | Orígenes permitidos | `*` o `https://tudominio.com` |
+| `CORS_ORIGIN` | Orígenes web permitidos | `*` (dev) o `https://tudominio.com,https://www.tudominio.com` |
+
+### Notas de CORS
+
+- El navegador es el único que aplica CORS: **la app móvil no lo usa**, así que con
+  `*` en desarrollo todo funciona igual.
+- En producción con web (landing, panel), pon la lista exacta de dominios
+  separados por coma; cualquier otro sitio queda bloqueado.
+- El WebSocket de duelos (`/ws`) **no** usa CORS: se protege con el token JWT en la
+  query string (`?token=...`).
 
 ## API
 
@@ -113,6 +122,24 @@ Usa `test/helpers/bootstrap.js` para levantar un esquema aislado
 ```
 
 ## Despliegue
+
+### Vercel (API REST)
+
+La API pública corre en Vercel vía `api/index.js` (exporta la app Express;
+`server.js` solo se usa en local con `listen`). `vercel.json` enruta todo a esa
+función.
+
+1. Crea el proyecto en Vercel apuntando a este repo (`main`).
+2. Env vars del proyecto: `DATABASE_URL` (p. ej. Supabase), `JWT_SECRET`,
+   `CORS_ORIGIN=*` o dominios exactos.
+3. Deploy. Health check: `https://tu-dominio.vercel.app/api/health`.
+
+> **Duelos:** Vercel serverless **no** soporta WebSocket. `/api/*` funciona en
+> la nube; los duelos necesitan un host con WebSocket propio (el `npm start`
+> local, un VPS, Render con WebSockets, etc.). La app móvil usa el API REST de
+> Vercel y apunta el WebSocket a otro host vía `--dart-define=WS_URL=`.
+
+### Server con WebSocket (duelos)
 
 1. Postgres gestionado (p. ej. Supabase) → copia la connection string a `DATABASE_URL`.
 2. Define `JWT_SECRET` fuerte y `CORS_ORIGIN` con el dominio real del front.

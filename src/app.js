@@ -6,7 +6,15 @@ const routes = require('./routes');
 function createApp() {
   const app = express();
 
-  app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
+  // CORS: '*' en dev. En producción, lista exacta de orígenes web separados
+  // por coma (p. ej. https://colibri.app,https://www.colibri.app).
+  // La app móvil no aplica CORS: eso lo controla solo el navegador.
+  const allowedOrigins = (process.env.CORS_ORIGIN || '*')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  app.use(cors({ origin: allowedOrigins.length > 1 ? allowedOrigins : allowedOrigins[0] || '*' }));
   app.use(express.json({ limit: '256kb' }));
 
   app.get('/api/health', (req, res) => {

@@ -47,9 +47,12 @@ function answerAll(st) {
   const tick = () => {
     if (!st.questions || i >= st.questions.length) return;
     const q = st.questions[i];
-    // Estrategia distinta por cliente para que los puntajes difieran
-    const option = st.strategy === 'last' ? q.opciones.length - 1 : 0;
-    st.ws.send(JSON.stringify({ type: 'answer', index: q.index, option, elapsedMs: 100 + i * 5 }));
+    // Estrategia distinta por cliente: opción y tiempo diferentes, para que
+    // nunca haya empate exacto (correct + totalMs) y el test sea determinista.
+    const last = st.strategy === 'last';
+    const option = last ? q.opciones.length - 1 : 0;
+    const base = last ? 200 : 100;
+    st.ws.send(JSON.stringify({ type: 'answer', index: q.index, option, elapsedMs: base + i * 5 }));
     i += 1;
     setTimeout(tick, 10);
   };

@@ -27,6 +27,33 @@ test('health responde ok', async () => {
   assert.equal(res.body.app, 'colibri');
 });
 
+test('CORS por defecto permite cualquier origen', async () => {
+  const res = await request(app)
+    .get('/api/health')
+    .set('Origin', 'https://cualquiera.com');
+  assert.equal(res.headers['access-control-allow-origin'], '*');
+});
+
+test('CORS acepta una lista de orígenes separada por coma', async () => {
+  const previous = process.env.CORS_ORIGIN;
+  process.env.CORS_ORIGIN = 'https://a.com, https://b.com';
+  const appWithList = require('../src/app').createApp();
+  if (previous === undefined) delete process.env.CORS_ORIGIN;
+  else process.env.CORS_ORIGIN = previous;
+
+  const permitido = await request(appWithList)
+    .get('/api/health')
+    .set('Origin', 'https://b.com');
+  assert.equal(permitido.status, 200);
+  assert.equal(permitido.headers['access-control-allow-origin'], 'https://b.com');
+
+  const bloqueado = await request(appWithList)
+    .get('/api/health')
+    .set('Origin', 'https://otro.com');
+  assert.equal(bloqueado.status, 200);
+  assert.equal(bloqueado.headers['access-control-allow-origin'], undefined);
+});
+
 test('crea jugador invitado y devuelve token', async () => {
   const res = await request(app)
     .post('/api/players/guest')
