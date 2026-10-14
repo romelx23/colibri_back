@@ -25,6 +25,7 @@ function attachDuelServer(httpServer) {
   wss.on('connection', (ws, req) => {
     let player = null;
     let room = null;
+    let playerLoaded;
 
     try {
       const url = new URL(req.url, 'http://localhost');
@@ -37,7 +38,9 @@ function attachDuelServer(httpServer) {
       return;
     }
 
-    query('SELECT id, display_name, avatar_seed FROM players WHERE id = $1', [player.playerId])
+    playerLoaded = query('SELECT id, display_name, avatar_seed FROM players WHERE id = $1', [
+      player.playerId,
+    ])
       .then(({ rows }) => {
         const row = rows[0];
         if (!row) {
@@ -51,7 +54,10 @@ function attachDuelServer(httpServer) {
           avatarSeed: row.avatar_seed,
           ws,
         };
-        send(ws, { type: 'hello', player: { playerId: player.playerId, displayName: player.displayName } });
+        send(ws, {
+          type: 'hello',
+          player: { playerId: player.playerId, displayName: player.displayName },
+        });
       })
       .catch(() => send(ws, { type: 'error', message: 'Error interno' }));
 
@@ -65,6 +71,11 @@ function attachDuelServer(httpServer) {
       }
 
       try {
+        // Los mensajes se procesan solo cuando el jugador ya tiene su ws
+        // asignada; si no, los broadcasts saldrían hacia `undefined`.
+        await playerLoaded;
+        if (ws.readyState !== 1) return;
+
         switch (msg.type) {
           case 'create': {
             if (room) rooms.leaveRoom(player.playerId);

@@ -1,3 +1,16 @@
 node_modules/
 .env
+.env.*
+!.env.example
 *.log
+npm-debug.log*
+
+# Salida local de herramientas de análisis
+graphify-out/
+coverage/
+
+# Editores / SO
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -183,6 +183,21 @@ test('ranking ordena por xp descendente e incluye tu fila', async () => {
   assert.ok(token2);
 });
 
+test('tu posición se calcula aunque quedes fuera del top N', async () => {
+  const res = await request(app)
+    .get('/api/leaderboard?period=all&limit=1')
+    .set('Authorization', `Bearer ${token1}`);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.items.length, 1);
+  assert.equal(res.body.items[0].displayName, 'Ana');
+  // Romel queda fuera del LIMIT pero su puesto real debe venir igual
+  assert.ok(res.body.me, 'me debe venir aunque el jugador no este en items');
+  assert.equal(res.body.me.displayName, 'Romel');
+  assert.equal(res.body.me.rank, 2);
+  assert.equal(res.body.me.position, 2);
+  assert.ok(!res.body.items.some((i) => i.playerId === res.body.me.playerId));
+});
+
 test('ranking por ventana (week) usa session_events', async () => {
   const res = await request(app).get('/api/leaderboard?period=week');
   assert.equal(res.status, 200);

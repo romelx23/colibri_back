@@ -8,6 +8,18 @@ const WINDOW_SQL = {
 
 const MAX_LIMIT = 100;
 
+function toEntry(r) {
+  return {
+    rank: Number(r.rank) || 1,
+    playerId: r.id,
+    displayName: r.display_name,
+    avatarSeed: r.avatar_seed,
+    isGuest: r.is_guest,
+    streak: r.streak,
+    score: Number(r.score),
+  };
+}
+
 async function getLeaderboard({ period = 'all', limit = 50, viewerId = null }) {
   if (!(period in WINDOW_SQL)) {
     throw Object.assign(new Error('periodo inválido'), { status: 400 });
@@ -22,8 +34,9 @@ async function getLeaderboard({ period = 'all', limit = 50, viewerId = null }) {
     ? `LEFT JOIN session_events se ON se.player_id = p.id AND se.created_at >= ${since}`
     : `LEFT JOIN session_events se ON false`;
 
-  const params = [lim];
-  const sql = `
+  // CTE compartido: el top-N y la posicion del viewer salen del mismo calculo,
+  // para que "tu posición" sea correcta aunque quede fuera del LIMIT.
+  const cte = `
     WITH scored AS (
       SELECT p.id,
              p.display_name,
@@ -35,35 +48,46 @@ async function getLeaderboard({ period = 'all', limit = 50, viewerId = null }) {
       FROM players p
       ${joinSql}
       GROUP BY p.id
-    )
-    SELECT id,
-           display_name,
-           avatar_seed,
-           is_guest,
-           streak,
-           score,
-           RANK() OVER (ORDER BY score DESC, created_at ASC) AS rank
-    FROM scored
-    ORDER BY rank, display_name
-    LIMIT $1
-  `;
+    ),
+    ranked AS (
+      SELECT id,
+             display_name,
+             avatar_seed,
+             is_guest,
+             streak,
+             score,
+             RANK() OVER (ORDER BY score DESC, created_at ASC) AS rank
+      FROM scored
+    )`;
 
-  const { rows } = await query(sql, params);
+  const { rows } = await query(
+    `${cte}
+     SELECT * FROM ranked
+     ORDER BY rank, display_name
+     LIMIT $1`,
+    [lim]
+  );
 
-  const items = rows.map((r, i) => ({
-    rank: Number(r.rank) || i + 1,
-    playerId: r.id,
-    displayName: r.display_name,
-    avatarSeed: r.avatar_seed,
-    isGuest: r.is_guest,
-    streak: r.streak,
-    score: Number(r.score),
-  }));
+  const items = rows.map(toEntry);
 
   let me = null;
   if (viewerId) {
     const idx = items.findIndex((it) => it.playerId === viewerId);
-    if (idx >= 0) me = { ...items[idx], position: idx + 1 };
+    if (idx >= 0) {
+      me = { ...items[idx], position: items[idx].rank };
+    } else {
+      // Fuera del top: su ranking se calcula igual, sin LIMIT.
+      const viewer = await query(
+        `${cte}
+         SELECT * FROM ranked
+         WHERE id = $1`,
+        [viewerId]
+      );
+      if (viewer.rows[0]) {
+        const entry = toEntry(viewer.rows[0]);
+        me = { ...entry, position: entry.rank };
+      }
+    }
   }
 
   return { period, items, me };
