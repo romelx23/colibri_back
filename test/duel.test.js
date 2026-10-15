@@ -22,13 +22,14 @@ async function guest(name) {
 function connect(token) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://localhost:${port}/ws?token=${token}`);
-    const st = { ws, questions: null, done: false, result: null, error: null, code: null, room: null, excluded: null, lefts: [], peers: [] };
+    const st = { ws, questions: null, done: false, result: null, error: null, code: null, room: null, excluded: null, lefts: [], peers: [], msgs: [] };
 
     ws.on('open', () => resolve(st));
     ws.on('error', reject);
     ws.on('message', (raw) => {
       const msg = JSON.parse(raw.toString());
       st.last = msg;
+      st.msgs.push(msg);
       if (msg.type === 'created') st.code = msg.code;
       else if (msg.type === 'room') st.room = msg.room;
       else if (msg.type === 'start') {
@@ -142,6 +143,12 @@ test('duelo completo: crea, une, juega 10 preguntas y persiste', async () => {
     p2.peers.every((m) => typeof m.answered === 'number' && typeof m.correct === 'number'),
     'peerProgress lleva respondidas y aciertos'
   );
+
+  const resultIndex = p1.msgs.findIndex((m) => m.type === 'result');
+  p2.ws.close();
+  await new Promise((r) => setTimeout(r, 700));
+  const lateRooms = p1.msgs.slice(resultIndex + 1).filter((m) => m.type === 'room');
+  assert.equal(lateRooms.length, 0, 'el roster no se reenvia tras el resultado');
 
   p1.ws.close();
   p2.ws.close();

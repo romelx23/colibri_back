@@ -8,6 +8,8 @@ function send(ws, msg) {
 }
 
 function broadcastRoom(room) {
+  // La partida ya cerró: el ranking final no cambia aunque alguien se vaya.
+  if (room.status === 'finished') return;
   const payload = { type: 'room', room: rooms.publicRoom(room) };
   for (const p of room.players) send(p.ws, payload);
 }
