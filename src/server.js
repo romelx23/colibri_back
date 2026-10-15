@@ -3,12 +3,17 @@ const http = require('http');
 const { createApp } = require('./app');
 const { attachDuelServer } = require('./ws/duelServer');
 const { getPool, closePool } = require('./config/db');
+const { migrate } = require('../db/migrate');
 
 const PORT = Number(process.env.PORT) || 4000;
 
 async function start() {
   // falla temprano si la DB no responde
-  await getPool().query('SELECT 1');
+  const pool = getPool();
+  await pool.query('SELECT 1');
+
+  // esquema al día antes de aceptar conexiones (idempotente y registrada)
+  await migrate(pool);
 
   const app = createApp();
   const server = http.createServer(app);

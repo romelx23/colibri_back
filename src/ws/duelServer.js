@@ -7,20 +7,64 @@ function send(ws, msg) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg));
 }
 
-function otherOf(room, playerId) {
-  if (room.host && room.host.playerId === playerId) return room.guest;
-  return room.host;
-}
-
 function broadcastRoom(room) {
   const payload = { type: 'room', room: rooms.publicRoom(room) };
-  for (const p of [room.host, room.guest]) {
-    if (p) send(p.ws, payload);
+  for (const p of room.players) send(p.ws, payload);
+}
+
+function broadcastExcept(room, playerId, msg) {
+  for (const p of room.players) {
+    if (p.playerId !== playerId) send(p.ws, msg);
   }
+}
+
+async function finish(room) {
+  const result = await rooms.persistResult(room);
+  for (const p of room.players) send(p.ws, { type: 'result', result });
+}
+
+function dispatchStart(room, { included, excluded }) {
+  const questions = rooms.publicQuestions(room);
+  for (const p of included) send(p.ws, { type: 'start', questions });
+  for (const p of excluded) {
+    send(p.ws, { type: 'excluded', message: 'La partida empezó sin ti.' });
+  }
+  broadcastRoom(room);
+}
+
+function afterLeave(ws, res, { notify }) {
+  if (res.finish && res.room) {
+    finish(res.room).catch((err) => {
+      send(ws, { type: 'error', message: err.message || 'No se pudo guardar el duelo' });
+    });
+    return res.room;
+  }
+  if (!res.room) return null;
+
+  broadcastRoom(res.room);
+  if (notify && res.removed) {
+    broadcastExcept(res.room, res.removed.playerId, {
+      type: 'playerLeft',
+      playerId: res.removed.playerId,
+      displayName: res.removed.displayName,
+    });
+  }
+  return res.room;
 }
 
 function attachDuelServer(httpServer) {
   const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
+
+  // Si al salir alguien quedaron todos los restantes listos, arranca solo.
+  async function resumeStart(room, ws) {
+    if (!room || room.status !== 'waiting') return;
+    try {
+      const started = await rooms.startIfReady(room);
+      if (started) dispatchStart(room, started);
+    } catch (err) {
+      send(ws, { type: 'error', message: err.message || 'No se pudo iniciar' });
+    }
+  }
 
   wss.on('connection', (ws, req) => {
     let player = null;
@@ -76,10 +120,13 @@ function attachDuelServer(httpServer) {
         await playerLoaded;
         if (ws.readyState !== 1) return;
 
+        const liveRoom = room && rooms.getRoom(room.code);
+
         switch (msg.type) {
           case 'create': {
-            if (room) rooms.leaveRoom(player.playerId);
+            const prev = liveRoom;
             room = rooms.createRoom(player);
+            if (prev && prev !== room) broadcastRoom(prev);
             send(ws, { type: 'created', code: room.code });
             broadcastRoom(room);
             break;
@@ -87,29 +134,40 @@ function attachDuelServer(httpServer) {
 
           case 'join': {
             const code = String(msg.code || '').trim();
+            const prev = liveRoom;
             const res = rooms.joinRoom(code, player);
             if (res.error) {
               send(ws, { type: 'error', message: res.error });
               break;
             }
+            if (prev && prev !== res.room) broadcastRoom(prev);
             room = res.room;
             broadcastRoom(room);
             break;
           }
 
           case 'ready': {
-            if (!room) break;
-            const me = room.host.playerId === player.playerId ? room.host : room.guest;
-            if (!me) break;
-            me.ready = true;
+            if (!liveRoom) break;
+            if (!rooms.setReady(room, player.playerId)) break;
             broadcastRoom(room);
 
             const started = await rooms.startIfReady(room);
-            if (started) {
-              for (const p of [room.host, room.guest]) {
-                send(p.ws, { type: 'start', questions: rooms.publicQuestions(room) });
-              }
+            if (started) dispatchStart(room, started);
+            break;
+          }
+
+          case 'startNow': {
+            if (!liveRoom) break;
+            if (!rooms.isHost(room, player.playerId)) {
+              send(ws, { type: 'error', message: 'Solo el anfitrión puede empezar' });
+              break;
             }
+            rooms.setReady(room, player.playerId);
+            broadcastRoom(room);
+
+            const started = await rooms.startIfReady(room, { force: true });
+            if (started) dispatchStart(room, started);
+            else send(ws, { type: 'error', message: 'Se necesitan al menos 2 jugadores listos' });
             break;
           }
 
@@ -127,26 +185,28 @@ function attachDuelServer(httpServer) {
               break;
             }
 
-            const rival = otherOf(room, player.playerId);
-            send(ws, { type: 'answerAck', index: msg.index, correct: res.isCorrect });
-            send(rival && rival.ws, { type: 'opponentAnswer', index: msg.index });
+            send(ws, {
+              type: 'answerAck',
+              index: msg.index,
+              correct: res.isCorrect,
+              answered: res.answered,
+            });
+            broadcastExcept(room, player.playerId, {
+              type: 'peerProgress',
+              playerId: player.playerId,
+              answered: res.answered,
+              correct: res.correct,
+            });
 
-            if (rooms.bothDone(room)) {
-              const result = await rooms.persistResult(room);
-              for (const p of [room.host, room.guest]) {
-                send(p.ws, { type: 'result', result });
-              }
-            }
+            if (rooms.allDone(room)) await finish(room);
             break;
           }
 
           case 'leave': {
-            if (room) {
-              const rival = otherOf(room, player.playerId);
-              send(rival && rival.ws, { type: 'opponentLeft' });
-              rooms.leaveRoom(player.playerId);
-              room = null;
-            }
+            if (!room) break;
+            const res = rooms.removeFromRoom(room, player.playerId);
+            room = afterLeave(ws, res, { notify: true });
+            await resumeStart(room, ws);
             break;
           }
 
@@ -159,10 +219,16 @@ function attachDuelServer(httpServer) {
     });
 
     ws.on('close', () => {
-      if (room) {
-        const rival = otherOf(room, player.playerId);
-        send(rival && rival.ws, { type: 'opponentLeft' });
-        rooms.leaveRoom(player.playerId);
+      if (!room) return;
+      try {
+        const res = rooms.removeFromRoom(room, player.playerId);
+        room = null;
+        if (res.room) {
+          afterLeave(ws, res, { notify: true });
+          resumeStart(res.room, ws);
+        }
+      } catch {
+        // sin sesión que avisar: la sala ya quedó limpia
       }
     });
   });

@@ -22,7 +22,7 @@ async function guest(name) {
 function connect(token) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://localhost:${port}/ws?token=${token}`);
-    const st = { ws, questions: null, done: false, result: null, error: null, code: null, room: null };
+    const st = { ws, questions: null, done: false, result: null, error: null, code: null, room: null, excluded: null, lefts: [], peers: [] };
 
     ws.on('open', () => resolve(st));
     ws.on('error', reject);
@@ -37,7 +37,10 @@ function connect(token) {
       } else if (msg.type === 'result') {
         st.result = msg.result;
         st.done = true;
-      } else if (msg.type === 'error') st.error = msg.message;
+      }       else if (msg.type === 'excluded') st.excluded = msg;
+      else if (msg.type === 'playerLeft') st.lefts.push(msg);
+      else if (msg.type === 'peerProgress') st.peers.push(msg);
+      else if (msg.type === 'error') st.error = msg.message;
     });
   });
 }
@@ -134,30 +137,150 @@ test('duelo completo: crea, une, juega 10 preguntas y persiste', async () => {
   assert.ok(total >= 1, 'alguien debe haber acertado');
   assert.ok(result.winnerId || total === 0);
 
+  assert.ok(p2.peers.length >= 1, 'los rivales reciben el avance en vivo');
+  assert.ok(
+    p2.peers.every((m) => typeof m.answered === 'number' && typeof m.correct === 'number'),
+    'peerProgress lleva respondidas y aciertos'
+  );
+
   p1.ws.close();
   p2.ws.close();
 });
 
-test('la sala llena rechaza a un tercer jugador', async () => {
-  const a = await guest('Uno');
-  const b = await guest('Dos');
-  const c = await guest('Tres');
+test('la sala acepta hasta 8 jugadores y rechaza al noveno', async () => {
+  const seats = [];
+  for (let i = 0; i < 9; i += 1) {
+    const g = await guest(`J${i}`);
+    seats.push(await connect(g.token));
+  }
+
+  seats[0].ws.send(JSON.stringify({ type: 'create' }));
+  await waitFor(() => seats[0].code);
+  for (let i = 1; i < 8; i += 1) {
+    seats[i].ws.send(JSON.stringify({ type: 'join', code: seats[0].code }));
+    await waitFor(() => seats[i].room && seats[i].room.players.length === i + 1);
+  }
+  assert.equal(seats[7].room.players.length, 8);
+  assert.equal(seats[7].room.maxPlayers, 8);
+
+  seats[8].ws.send(JSON.stringify({ type: 'join', code: seats[0].code }));
+  await waitFor(() => seats[8].error);
+  assert.equal(seats[8].error, 'La sala está llena (8/8)');
+
+  for (const s of seats) s.ws.close();
+});
+
+test('el anfitrión puede empezar con al menos 2 listos', async () => {
+  const a = await guest('Anfitrion');
+  const b = await guest('Listo');
+  const c = await guest('Tardio');
 
   const p1 = await connect(a.token);
   const p2 = await connect(b.token);
   const p3 = await connect(c.token);
+  p2.strategy = 'last';
 
   p1.ws.send(JSON.stringify({ type: 'create' }));
   await waitFor(() => p1.code);
   p2.ws.send(JSON.stringify({ type: 'join', code: p1.code }));
   await waitFor(() => p2.room && p2.room.players.length === 2);
   p3.ws.send(JSON.stringify({ type: 'join', code: p1.code }));
-  await waitFor(() => p3.error);
-  assert.equal(p3.error, 'La sala ya está llena');
+  await waitFor(() => p3.room && p3.room.players.length === 3);
 
-  p1.ws.close();
-  p2.ws.close();
-  p3.ws.close();
+  p2.ws.send(JSON.stringify({ type: 'ready' }));
+  await waitFor(() => p1.room && p1.room.players.filter((p) => p.ready).length === 1);
+
+  p1.ws.send(JSON.stringify({ type: 'startNow' }));
+  await waitFor(() => p1.questions && p2.questions);
+  await waitFor(() => p3.excluded);
+  assert.equal(p3.excluded.message, 'La partida empezó sin ti.');
+
+  await waitFor(() => p1.done && p2.done, 20000);
+  assert.equal(p1.result.players.length, 2);
+  assert.ok(p1.result.winnerId || p1.result.players[0].correct === p1.result.players[1].correct);
+
+  for (const p of [p1, p2, p3]) p.ws.close();
+});
+
+test('si un jugador se va, los demás siguen y terminan', async () => {
+  const a = await guest('Queda');
+  const b = await guest('Sigue');
+  const c = await guest('SeVa');
+
+  const p1 = await connect(a.token);
+  const p2 = await connect(b.token);
+  const p3 = await connect(c.token);
+  p1.strategy = 'first';
+  p2.strategy = 'last';
+
+  p1.ws.send(JSON.stringify({ type: 'create' }));
+  await waitFor(() => p1.code);
+  for (const [p, code] of [[p2, p1.code], [p3, p1.code]]) {
+    p.ws.send(JSON.stringify({ type: 'join', code }));
+    await waitFor(() => p.room && p.room.players.length >= 2);
+  }
+  await waitFor(() => p1.room.players.length === 3);
+
+  p1.ws.send(JSON.stringify({ type: 'ready' }));
+  p2.ws.send(JSON.stringify({ type: 'ready' }));
+  await waitFor(() => p1.room.players.filter((p) => p.ready).length === 2);
+
+  p3.ws.send(JSON.stringify({ type: 'leave' }));
+  await waitFor(() => p1.questions && p2.questions, 15000);
+  assert.ok(p1.lefts.some((m) => m.displayName === 'SeVa'), 'avisa quién salió');
+
+  await waitFor(() => p1.done && p2.done, 20000);
+  assert.equal(p1.result.players.length, 2, 'la sala sigue con los2 restantes');
+
+  for (const p of [p1, p2, p3]) p.ws.close();
+});
+
+test('duelo de 8 jugadores: ranking ordenado y fila por jugador', async () => {
+  const { query } = require('../src/config/db');
+  const seats = [];
+  for (let i = 0; i < 8; i += 1) {
+    const g = await guest(`Ocho${i}`);
+    const c = await connect(g.token);
+    c.strategy = i % 2 ? 'last' : 'first';
+    seats.push(c);
+  }
+
+  seats[0].ws.send(JSON.stringify({ type: 'create' }));
+  await waitFor(() => seats[0].code);
+  for (let i = 1; i < 8; i += 1) {
+    seats[i].ws.send(JSON.stringify({ type: 'join', code: seats[0].code }));
+    await waitFor(() => seats[i].room && seats[i].room.players.length === i + 1);
+  }
+
+  for (const s of seats) s.ws.send(JSON.stringify({ type: 'ready' }));
+  await waitFor(() => seats.every((s) => s.questions), 20000);
+  await waitFor(() => seats.every((s) => s.done), 30000);
+
+  const result = seats[0].result;
+  assert.equal(result.players.length, 8, 'los8 deben aparecer en el resultado');
+  assert.deepEqual(
+    result.players.map((p) => p.position),
+    [1, 2, 3, 4, 5, 6, 7, 8],
+    'posiciones correlativas'
+  );
+  for (let i = 1; i < result.players.length; i += 1) {
+    assert.ok(
+      result.players[i - 1].correct >= result.players[i].correct,
+      'el ranking ordena por aciertos'
+    );
+  }
+
+  const rows = await query(
+    `SELECT count(*)::int AS n, count(*) FILTER (WHERE is_winner)::int AS winners
+       FROM duel_players dp
+       JOIN duels d ON d.id = dp.duel_id
+      WHERE d.code = $1`,
+    [result.code]
+  );
+  assert.equal(rows.rows[0].n, 8, 'una fila por participante en duel_players');
+  assert.ok(rows.rows[0].winners <= 1, 'como mucho un ganador marcado');
+
+  for (const s of seats) s.ws.close();
 });
 
 test('unirse a una sala inexistente da error', async () => {

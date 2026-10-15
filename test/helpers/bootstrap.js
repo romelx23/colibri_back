@@ -25,7 +25,7 @@ async function prepare() {
   await migrate(pool);
   await seed(pool);
   await pool.query(
-    'TRUNCATE duel_answers, duels, session_events, players RESTART IDENTITY CASCADE'
+    'TRUNCATE duel_players, duel_answers, duels, session_events, players RESTART IDENTITY CASCADE'
   );
 
   const { closePool } = require('../../src/config/db');
