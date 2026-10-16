@@ -2,6 +2,13 @@ const bcrypt = require('bcryptjs');
 const { z } = require('zod');
 const { query } = require('../config/db');
 const { signToken } = require('../middleware/auth');
+const { validateName } = require('../utils/sanitizeName');
+const {
+  DEFAULT_AVATAR,
+  getAvatar,
+  isUnlocked,
+  rankOf,
+} = require('../config/avatars');
 
 const guestSchema = z.object({
   deviceId: z.string().min(8).max(128),
@@ -18,16 +25,23 @@ const loginSchema = z.object({
   password: z.string().min(1).max(72),
 });
 
+const updateMeSchema = z.object({
+  displayName: z.string().trim().min(2).max(24),
+  avatarId: z.string().min(1).max(40),
+});
+
 function publicPlayer(row) {
   return {
     id: row.id,
     deviceId: row.device_id,
     displayName: row.display_name,
     avatarSeed: row.avatar_seed,
+    avatarId: row.avatar_id || DEFAULT_AVATAR,
     isGuest: row.is_guest,
     email: row.email,
     xp: row.xp,
     points: row.points,
+    examBest: row.exam_best,
     streak: row.streak,
     bestStreak: row.best_streak,
     sessions: row.sessions,
@@ -35,13 +49,17 @@ function publicPlayer(row) {
   };
 }
 
-exports.schemas = { guestSchema, registerSchema, loginSchema };
+exports.schemas = { guestSchema, registerSchema, loginSchema, updateMeSchema };
 exports.publicPlayer = publicPlayer;
 
 // POST /api/players/guest — crea o recupera el invitado por deviceId
 exports.guest = async (req, res, next) => {
   try {
-    const { deviceId, name } = req.body;
+    const { deviceId } = req.body;
+    // El nombre pasará el filtro: si viene ofensivo, se degrada a "Jugador"
+    // (el jugador podrá elegir otro desde la pantalla de identidad).
+    const check = validateName(req.body.name);
+    const name = check.ok ? check.name : 'Jugador';
 
     const existing = await query('SELECT * FROM players WHERE device_id = $1', [deviceId]);
     if (existing.rows[0]) {
@@ -57,11 +75,11 @@ exports.guest = async (req, res, next) => {
     }
 
     const inserted = await query(
-      `INSERT INTO players (device_id, display_name, avatar_seed, is_guest)
-       VALUES ($1, $2, $3, true)
+      `INSERT INTO players (device_id, display_name, avatar_seed, avatar_id, is_guest)
+       VALUES ($1, $2, $3, $4, true)
        ON CONFLICT (device_id) DO UPDATE SET updated_at = now()
        RETURNING *`,
-      [deviceId, name, Math.floor(Math.random() * 1000000)]
+      [deviceId, name, Math.floor(Math.random() * 1000000), DEFAULT_AVATAR]
     );
     const row = inserted.rows[0];
     res.status(201).json({ player: publicPlayer(row), token: signToken(row) });
@@ -118,3 +136,69 @@ exports.login = async (req, res, next) => {
 exports.me = async (req, res) => {
   res.json({ player: publicPlayer(req.player) });
 };
+
+// PUT /api/players/me — cambia nickname e icono de perfil
+// - El nombre pasa el filtro de ofensas (422 si lo viola)
+// - Debe ser único: si existe, responde 409 con una sugerencia "nombreN"
+// - El icono debe estar desbloqueado según el XP del jugador (403 si no)
+exports.update = async (req, res, next) => {
+  try {
+    const playerId = req.player.id;
+    const { avatarId } = req.body;
+
+    const check = validateName(req.body.displayName);
+    if (!check.ok) {
+      return res.status(422).json({ error: check.reason });
+    }
+    const displayName = check.name;
+
+    const avatar = getAvatar(avatarId);
+    if (!avatar) {
+      return res.status(422).json({ error: 'Icono de perfil no válido' });
+    }
+    if (!isUnlocked(avatar, req.player.xp)) {
+      const rank = rankOf(req.player.xp);
+      return res.status(403).json({
+        error: `Ese icono se desbloquea al llegar al rango con ${avatar.minXp} XP (vas en ${rank.name}: ${req.player.xp} XP)`,
+      });
+    }
+
+    // Unicidad (case-insensitive), excluyendo al propio jugador.
+    const dupe = await query(
+      'SELECT id FROM players WHERE lower(display_name) = lower($1) AND id <> $2',
+      [displayName, playerId]
+    );
+    if (dupe.rows[0]) {
+      const suggestion = await freeName(displayName, playerId);
+      return res.status(409).json({
+        error: 'Ese nombre ya está en uso',
+        suggestion,
+      });
+    }
+
+    const updated = await query(
+      `UPDATE players
+         SET display_name = $2, avatar_id = $3, updated_at = now()
+       WHERE id = $1
+       RETURNING *`,
+      [playerId, displayName, avatarId]
+    );
+    res.json({ player: publicPlayer(updated.rows[0]) });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Busca la primera variante "nombre2", "nombre3"... libre para este jugador.
+async function freeName(base, playerId) {
+  const trimmed = base.slice(0, 19); // deja sitio para el sufijo dentro de 24
+  for (let n = 2; n <= 99; n++) {
+    const candidate = `${trimmed}${n}`;
+    const { rows } = await query(
+      'SELECT id FROM players WHERE lower(display_name) = lower($1) AND id <> $2',
+      [candidate, playerId]
+    );
+    if (!rows[0]) return candidate;
+  }
+  return `${trimmed}${Math.floor(100 + Math.random() * 900)}`;
+}

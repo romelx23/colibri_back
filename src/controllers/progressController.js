@@ -89,7 +89,7 @@ exports.reset = async (req, res, next) => {
     const playerId = req.player.id;
     await query(
       `UPDATE players
-          SET xp = 0, points = 0, streak = 0, best_streak = 0, sessions = 0, updated_at = now()
+          SET xp = 0, points = 0, exam_best = 0, streak = 0, best_streak = 0, sessions = 0, updated_at = now()
         WHERE id = $1`,
       [playerId]
     );

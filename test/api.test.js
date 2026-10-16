@@ -3,9 +3,33 @@ const assert = require('node:assert/strict');
 const request = require('supertest');
 
 const { prepare } = require('./helpers/bootstrap');
+const { pointsFor } = require('../src/services/examScoring');
 
 let app;
 let closePool;
+
+// Preguntas reales del seed, con su respuesta correcta (el servidor es quien
+// conoce `correcta`; el cliente solo manda sus índices elegidos).
+async function takeQuestions(n) {
+  const { query } = require('../src/config/db');
+  const { rows } = await query(
+    'SELECT id, correcta, dificultad, fuente FROM questions ORDER BY id LIMIT $1',
+    [n]
+  );
+  assert.ok(rows.length === n, `se esperaban ${n} preguntas del seed`);
+  return rows;
+}
+
+function wrongIndex(q) {
+  return q.correcta === 0 ? 1 : q.correcta - 1;
+}
+
+async function submitExam(token, answers, extra = {}) {
+  return request(app)
+    .post('/api/exams/submit')
+    .set('Authorization', `Bearer ${token}`)
+    .send({ answers, ...extra });
+}
 
 before(async () => {
   await prepare();
@@ -19,6 +43,8 @@ after(async () => {
 
 let token1;
 let token2;
+let betoToken;
+let examBestRomel;
 
 test('health responde ok', async () => {
   const res = await request(app).get('/api/health');
@@ -180,22 +206,65 @@ test('login con credenciales incorrectas', async () => {
   assert.equal(res.status, 401);
 });
 
-test('ranking ordena por xp descendente e incluye tu fila', async () => {
+test('examen: el servidor calcula el puntaje ponderado y aprueba con corte', async () => {
+  const qs = await takeQuestions(5);
+  const expected = qs.reduce((sum, q) => sum + pointsFor(q), 0);
+  const res = await submitExam(
+    token1,
+    qs.map((q) => ({ questionId: q.id, answerIndex: q.correcta, elapsedMs: 4000 }))
+  );
+  assert.equal(res.status, 201);
+  assert.equal(res.body.correct, 5);
+  assert.equal(res.body.total, 5);
+  assert.equal(res.body.percent, 100);
+  assert.equal(res.body.passed, true);
+  assert.equal(res.body.score, expected);
+  assert.equal(res.body.examBest, expected);
+  examBestRomel = expected;
+});
+
+test('examen: incorrectas y en blanco suman 0 y exam_best no baja', async () => {
+  const qs = await takeQuestions(4);
+  const res = await submitExam(token1, [
+    { questionId: qs[0].id, answerIndex: qs[0].correcta },
+    { questionId: qs[1].id, answerIndex: wrongIndex(qs[1]) },
+    { questionId: qs[2].id, answerIndex: -1 },
+    { questionId: qs[3].id, answerIndex: wrongIndex(qs[3]) },
+  ]);
+  assert.equal(res.status, 201);
+  assert.equal(res.body.correct, 1);
+  assert.equal(res.body.unanswered, 1);
+  assert.equal(res.body.percent, 25);
+  assert.equal(res.body.passed, false);
+  assert.equal(res.body.score, pointsFor(qs[0]));
+  assert.equal(res.body.examBest, examBestRomel, 'un examen malo no debe bajar el mejor puntaje');
+});
+
+test('examen: rechaza preguntas que no existen', async () => {
+  const res = await submitExam(token1, [{ questionId: 'no-existe', answerIndex: 0 }]);
+  assert.equal(res.status, 422);
+  assert.equal(res.body.error, 'Algunas preguntas no existen');
+});
+
+test('examen: requiere token', async () => {
+  const res = await request(app)
+    .post('/api/exams/submit')
+    .send({ answers: [{ questionId: 'x', answerIndex: 0 }] });
+  assert.equal(res.status, 401);
+});
+
+test('ranking global: ordena por mejor puntaje de examen e incluye tu fila', async () => {
   const other = await request(app)
     .post('/api/players/guest')
     .send({ deviceId: 'test-device-0002', name: 'Ana' });
-  await request(app)
-    .post('/api/progress/sync')
-    .set('Authorization', `Bearer ${other.body.token}`)
-    .send({
-      xp: 1200,
-      points: 60,
-      streak: 4,
-      bestStreak: 9,
-      sessions: 20,
-      xpDelta: 1200,
-      pointsDelta: 60,
-    });
+  // Ana hace un examen de 8 preguntas perfecto: supera a Romel (mejor = 5 perfectas)
+  const qs = await takeQuestions(8);
+  const anaExam = await submitExam(
+    other.body.token,
+    qs.map((q) => ({ questionId: q.id, answerIndex: q.correcta }))
+  );
+  assert.equal(anaExam.status, 201);
+  assert.ok(anaExam.body.score > examBestRomel);
 
   const res = await request(app)
     .get('/api/leaderboard?period=all')
@@ -204,10 +273,12 @@ test('ranking ordena por xp descendente e incluye tu fila', async () => {
   const names = res.body.items.map((i) => i.displayName);
   assert.deepEqual(names, ['Ana', 'Romel']);
   assert.equal(res.body.items[0].rank, 1);
+  assert.equal(res.body.items[0].score, anaExam.body.examBest);
   assert.equal(res.body.items[1].rank, 2);
   assert.equal(res.body.me.displayName, 'Romel');
   assert.equal(res.body.me.position, 2);
   assert.ok(token2);
+  anaToken = other.body.token;
 });
 
 test('tu posición se calcula aunque quedes fuera del top N', async () => {
@@ -225,12 +296,85 @@ test('tu posición se calcula aunque quedes fuera del top N', async () => {
   assert.ok(!res.body.items.some((i) => i.playerId === res.body.me.playerId));
 });
 
-test('ranking por ventana (week) usa session_events', async () => {
+test('ranking por ventana (week) refleja el examen del período', async () => {
   const res = await request(app).get('/api/leaderboard?period=week');
   assert.equal(res.status, 200);
   assert.equal(res.body.period, 'week');
   assert.ok(res.body.items.length >= 2);
   assert.ok(res.body.items[0].score >= res.body.items[1].score);
+  assert.ok(
+    res.body.items.every((i) => i.score > 0),
+    'todos los activos esta semana rinden con examenes, no con XP crudo'
+  );
+});
+
+test('identidad: el icono legendario exige el rango de XP', async () => {
+  const beto = await request(app)
+    .post('/api/players/guest')
+    .send({ deviceId: 'test-device-0003', name: 'Beto' });
+  betoToken = beto.body.token;
+
+  const res = await request(app)
+    .put('/api/players/me')
+    .set('Authorization', `Bearer ${betoToken}`)
+    .send({ displayName: 'Beto', avatarId: 'crown' }); // legendario: 2000 XP
+  assert.equal(res.status, 403);
+  assert.match(res.body.error, /se desbloquea/);
+
+  const invalid = await request(app)
+    .put('/api/players/me')
+    .set('Authorization', `Bearer ${betoToken}`)
+    .send({ displayName: 'Beto', avatarId: 'no-existe' });
+  assert.equal(invalid.status, 422);
+  assert.equal(invalid.body.error, 'Icono de perfil no válido');
+});
+
+test('identidad: el nickname ofensivo se rechaza', async () => {
+  const res = await request(app)
+    .put('/api/players/me')
+    .set('Authorization', `Bearer ${betoToken}`)
+    .send({ displayName: 'pendejo123', avatarId: 'chick' });
+  assert.equal(res.status, 422);
+  assert.match(res.body.error, /no permitidos/);
+});
+
+test('identidad: el nickname tomado responde 409 con sugerencia', async () => {
+  const res = await request(app)
+    .put('/api/players/me')
+    .set('Authorization', `Bearer ${betoToken}`)
+    .send({ displayName: 'Romel', avatarId: 'chick' });
+  assert.equal(res.status, 409);
+  assert.equal(res.body.error, 'Ese nombre ya está en uso');
+  assert.match(res.body.suggestion, /^Romel\d+$/);
+});
+
+test('identidad: con XP suficiente elige icono épico y renombra', async () => {
+  await request(app)
+    .post('/api/progress/sync')
+    .set('Authorization', `Bearer ${betoToken}`)
+    .send({ xp: 300, points: 0, streak: 1, bestStreak: 1, sessions: 1, xpDelta: 300, pointsDelta: 0 });
+
+  const res = await request(app)
+    .put('/api/players/me')
+    .set('Authorization', `Bearer ${betoToken}`)
+    .send({ displayName: 'Beto2026', avatarId: 'fox' }); // épico: 300 XP
+  assert.equal(res.status, 200);
+  assert.equal(res.body.player.displayName, 'Beto2026');
+  assert.equal(res.body.player.avatarId, 'fox');
+
+  const me = await request(app)
+    .get('/api/players/me')
+    .set('Authorization', `Bearer ${betoToken}`);
+  assert.equal(me.body.player.avatarId, 'fox');
+  assert.equal(me.body.player.displayName, 'Beto2026');
+});
+
+test('guest: un nombre ofensivo degrada a Jugador en lugar de guardarlo', async () => {
+  const res = await request(app)
+    .post('/api/players/guest')
+    .send({ deviceId: 'test-device-0004', name: 'puto feo' });
+  assert.equal(res.status, 201);
+  assert.equal(res.body.player.displayName, 'Jugador');
 });
 
 test('periodo inválido da 400', async () => {

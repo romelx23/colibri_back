@@ -1,4 +1,5 @@
 const { query } = require('../config/db');
+const { DEFAULT_AVATAR } = require('../config/avatars');
 
 const WINDOW_SQL = {
   week: "now() - interval '7 days'",
@@ -14,6 +15,7 @@ function toEntry(r) {
     playerId: r.id,
     displayName: r.display_name,
     avatarSeed: r.avatar_seed,
+    avatarId: r.avatar_id || DEFAULT_AVATAR,
     isGuest: r.is_guest,
     streak: r.streak,
     score: Number(r.score),
@@ -27,11 +29,14 @@ async function getLeaderboard({ period = 'all', limit = 50, viewerId = null }) {
   const lim = Math.min(Math.max(Number(limit) || 50, 1), MAX_LIMIT);
   const since = WINDOW_SQL[period];
 
+  // Métrica: mejor puntaje de examen. Histórico = exam_best del jugador;
+  // por ventana = mejor evento 'exam' registrado dentro del período.
   const scoreExpr = since
-    ? `COALESCE(SUM(se.xp_delta), 0)::int`
-    : `p.xp::int`;
+    ? `COALESCE(MAX(se.points_delta), 0)::int`
+    : `p.exam_best::int`;
   const joinSql = since
-    ? `LEFT JOIN session_events se ON se.player_id = p.id AND se.created_at >= ${since}`
+    ? `LEFT JOIN session_events se
+         ON se.player_id = p.id AND se.kind = 'exam' AND se.created_at >= ${since}`
     : `LEFT JOIN session_events se ON false`;
 
   // CTE compartido: el top-N y la posicion del viewer salen del mismo calculo,
@@ -41,6 +46,7 @@ async function getLeaderboard({ period = 'all', limit = 50, viewerId = null }) {
       SELECT p.id,
              p.display_name,
              p.avatar_seed,
+             p.avatar_id,
              p.is_guest,
              p.streak,
              p.created_at,
@@ -53,6 +59,7 @@ async function getLeaderboard({ period = 'all', limit = 50, viewerId = null }) {
       SELECT id,
              display_name,
              avatar_seed,
+             avatar_id,
              is_guest,
              streak,
              score,

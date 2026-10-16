@@ -8,7 +8,7 @@
     "dev": "nodemon src/server.js",
     "migrate": "node db/migrate.js",
     "seed": "node db/seed.js",
-    "test": "node --test --test-concurrency=1 test/api.test.js test/duel.test.js",
+    "test": "node --test --test-concurrency=1 test/sanitizeName.test.js test/api.test.js test/duel.test.js",
     "demo:duel": "node scripts/duel-demo.js"
   },
   "dependencies": {
